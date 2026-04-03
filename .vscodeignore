@@ -1,6 +1,9 @@
+.claude/**
 .eslintrc.json
 .gitignore
+.vscode/**
 node_modules/**
 src/**
 tsconfig.json
+icon.svg
 *.map

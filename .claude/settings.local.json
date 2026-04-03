@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(yarn add:*)",
-      "Bash(yarn compile:*)"
+      "Bash(yarn compile:*)",
+      "Bash(node_modules/.bin/vsce --version)",
+      "Bash(yarn vsce:*)"
     ]
   }
 }
