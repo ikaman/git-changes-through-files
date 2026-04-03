@@ -1,0 +1,78 @@
+{
+  "name": "git-changes-through-files",
+  "displayName": "Git Changes Through Files",
+  "description": "Navigate git diff changes across all changed files — automatically crosses file boundaries in Source Control order.",
+  "version": "0.5.0",
+  "publisher": "ikaman",
+  "license": "MIT",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "diff",
+    "changes",
+    "navigation",
+    "source control"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ikaman/git-changes-through-files.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ikaman/git-changes-through-files/issues"
+  },
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gitChangesThrough.nextChange",
+        "title": "Next Change",
+        "category": "Git Changes"
+      },
+      {
+        "command": "gitChangesThrough.previousChange",
+        "title": "Previous Change",
+        "category": "Git Changes"
+      }
+    ],
+    "configuration": {
+      "title": "Git Changes Through Files",
+      "properties": {
+        "gitChangesThrough.closeFileOnMove": {
+          "type": "boolean",
+          "default": false,
+          "description": "Close the current file when moving to a different changed file."
+        },
+        "gitChangesThrough.wrapAround": {
+          "type": "boolean",
+          "default": false,
+          "description": "When at the last change of the last file, wrap around to the first file's first change (and vice versa going backwards)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "yarn compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Background -->
+  <rect width="128" height="128" rx="18" fill="#1e1e2e"/>
+
+  <!-- File shape -->
+  <path d="M28 18 L72 18 L90 36 L90 110 L28 110 Z" fill="none" stroke="#89b4fa" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Folded corner -->
+  <path d="M72 18 L72 36 L90 36" fill="none" stroke="#89b4fa" stroke-width="5" stroke-linejoin="round"/>
+
+  <!-- Removed line (red) -->
+  <rect x="38" y="52" width="36" height="7" rx="3" fill="#f38ba8"/>
+  <!-- Added line (green) -->
+  <rect x="38" y="64" width="36" height="7" rx="3" fill="#a6e3a1"/>
+  <!-- Context line (dim) -->
+  <rect x="38" y="76" width="24" height="5" rx="2.5" fill="#585b70"/>
+
+  <!-- Forward arrow (right side, pointing out of file) -->
+  <path d="M100 56 L120 56" stroke="#cba6f7" stroke-width="5" stroke-linecap="round"/>
+  <path d="M112 48 L120 56 L112 64" stroke="#cba6f7" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
