@@ -305,31 +305,23 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
     if (currentFileIndex !== -1) {
         // If we're in a regular editor (not a diff view), open the diff for this
         // file first — don't treat it as "already past the last hunk".
-        if (!isInDiffEditor()) {
+        const hunks = await getHunksForChange(repo, cachedFiles[currentFileIndex]);
+
+        if (hunks.length === 0) {
+            // No parseable diff (untracked / binary) — fall through to next file.
+        } else if (!isInDiffEditor()) {
             await openDiffAndJumpToHunk(cachedFiles[currentFileIndex], repo, direction === 'prev');
             return;
-        }
-
-        const hunks = await getHunksForChange(repo, cachedFiles[currentFileIndex]);
-        const editor = vscode.window.activeTextEditor;
-
-        if (hunks.length > 0 && editor) {
-            // Editor lines are 0-based; diff hunks are 1-based.
-            const cursorLine = editor.selection.active.line + 1;
-
-            if (direction === 'next') {
-                // Find the first hunk strictly after the cursor.
-                const next = hunks.find(h => h.firstChangedLine > cursorLine);
-                if (next) {
-                    jumpToHunk(editor, next);
-                    return;
-                }
-            } else {
-                // Find the last hunk strictly before the cursor.
-                const prev = [...hunks].reverse().find(h => h.firstChangedLine < cursorLine);
-                if (prev) {
-                    jumpToHunk(editor, prev);
-                    return;
+        } else {
+            const editor = vscode.window.activeTextEditor;
+            if (editor) {
+                const cursorLine = editor.selection.active.line + 1;
+                if (direction === 'next') {
+                    const next = hunks.find(h => h.firstChangedLine > cursorLine);
+                    if (next) { jumpToHunk(editor, next); return; }
+                } else {
+                    const prev = [...hunks].reverse().find(h => h.firstChangedLine < cursorLine);
+                    if (prev) { jumpToHunk(editor, prev); return; }
                 }
             }
         }
