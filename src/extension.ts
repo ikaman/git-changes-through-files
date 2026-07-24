@@ -43,46 +43,43 @@ function parseHunks(diffText: string): Hunk[] {
     const lines = diffText.split('\n');
     let newLine = 0;
     let inHunk = false;
-    let hunkFirstChanged = 0;
+    // Tracks whether the previous line was part of a +/- run, so that a run
+    // of changed lines separated from another by context lines counts as a
+    // separate stop — a single "@@" hunk can contain several such runs when
+    // git merges nearby edits under one shared context window.
+    let inChangeRun = false;
 
     for (const line of lines) {
         const header = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
         if (header) {
-            if (inHunk && hunkFirstChanged > 0) {
-                hunks.push({ firstChangedLine: hunkFirstChanged });
-            }
             newLine = parseInt(header[1], 10);
             inHunk = true;
-            hunkFirstChanged = 0;
+            inChangeRun = false;
             continue;
         }
         if (!inHunk) {
             continue;
         }
         if (line.startsWith('+')) {
-            if (hunkFirstChanged === 0) {
-                hunkFirstChanged = newLine;
+            if (!inChangeRun) {
+                hunks.push({ firstChangedLine: newLine });
+                inChangeRun = true;
             }
             newLine++;
         } else if (line.startsWith('-')) {
             // deleted line — doesn't advance newLine, but marks where the change is
-            if (hunkFirstChanged === 0) {
-                hunkFirstChanged = newLine;
+            if (!inChangeRun) {
+                hunks.push({ firstChangedLine: newLine });
+                inChangeRun = true;
             }
         } else if (line.startsWith(' ')) {
             newLine++;
+            inChangeRun = false;
         } else {
             // end of hunk (e.g. "\ No newline at end of file" or next header)
-            if (hunkFirstChanged > 0) {
-                hunks.push({ firstChangedLine: hunkFirstChanged });
-                inHunk = false;
-                hunkFirstChanged = 0;
-            }
+            inHunk = false;
+            inChangeRun = false;
         }
-    }
-
-    if (inHunk && hunkFirstChanged > 0) {
-        hunks.push({ firstChangedLine: hunkFirstChanged });
     }
 
     return hunks;
@@ -251,9 +248,24 @@ function findActiveFileIndex(files: Change[]): number {
     );
 }
 
-function isInDiffEditor(): boolean {
+// Deleted files have no "modified" side to diff against, so `git.openChange`
+// opens a plain read-only preview of the original content instead of a two-pane
+// diff — match that case too, or navigation would think the diff was never
+// opened and keep re-opening the same file forever instead of advancing.
+function isViewingChange(change: Change): boolean {
     const tab = vscode.window.tabGroups.activeTabGroup?.activeTab;
-    return tab?.input instanceof vscode.TabInputTextDiff;
+    if (!tab) {
+        return false;
+    }
+    if (tab.input instanceof vscode.TabInputTextDiff) {
+        return tab.input.modified.fsPath === change.uri.fsPath
+            || tab.input.original.fsPath === change.originalUri?.fsPath;
+    }
+    if (tab.input instanceof vscode.TabInputText) {
+        return tab.input.uri.fsPath === change.uri.fsPath
+            || tab.input.uri.fsPath === change.originalUri?.fsPath;
+    }
+    return false;
 }
 
 function delay(ms: number): Promise<void> {
@@ -309,7 +321,7 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
 
         if (hunks.length === 0) {
             // No parseable diff (untracked / binary) — fall through to next file.
-        } else if (!isInDiffEditor()) {
+        } else if (!isViewingChange(cachedFiles[currentFileIndex])) {
             await openDiffAndJumpToHunk(cachedFiles[currentFileIndex], repo, direction === 'prev');
             return;
         } else {

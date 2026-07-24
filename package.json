@@ -2,7 +2,7 @@
   "name": "git-changes-through-files",
   "displayName": "Git Changes Through Files",
   "description": "Navigate git diff changes across all changed files — automatically crosses file boundaries in Source Control order.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "ikaman",
   "license": "MIT",
   "icon": "icon.png",
