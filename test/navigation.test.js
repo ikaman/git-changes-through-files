@@ -106,14 +106,17 @@ test('stops at the last change without wrapAround and shows an info message', as
   );
 });
 
-test('stress: many random file/hunk layouts never stall or skip, across focus quirks', async () => {
+test('stress: many random file/hunk layouts never stall or skip, across focus quirks', async (t) => {
+  // Each seed/behavior combination is its own reported subtest (not folded into
+  // one pass/fail), so a failure names exactly which combination broke and the
+  // total test count reflects how many cases were actually checked.
   const behaviors = { normal: openNormal, focusOriginal: openFocusOriginal, staleTabGroup: openStaleTabGroup };
   for (let seed = 1; seed <= 25; seed++) {
     const files = randomFiles(5, seed);
     if (files.every((f) => f.hunkLines.length === 0)) continue; // nothing to walk
     for (const [name, behavior] of Object.entries(behaviors)) {
-      await assertWalksAllHunksForward(files, behavior).catch((err) => {
-        throw new Error(`seed=${seed} behavior=${name}: ${err.message}`);
+      await t.test(`seed=${seed} behavior=${name}`, async () => {
+        await assertWalksAllHunksForward(files, behavior);
       });
     }
   }
