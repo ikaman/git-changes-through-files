@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as nodePath from 'path';
+import * as fs from 'fs';
 
 // ── Minimal git extension API types ───────────────────────────────────────────
 
@@ -90,6 +91,57 @@ function parseHunks(diffText: string): Hunk[] {
 let currentFileIndex = -1;
 let cachedFiles: Change[] = [];
 let cachedRepoRoot = '';
+
+// ── Debug logging ─────────────────────────────────────────────────────────────
+// Off by default. When enabled via gitChangesThrough.debugLog, every navigate()
+// decision is written to both an output channel and a log file on disk, so a log
+// from a real repro can be sent along with a bug report.
+
+let outputChannel: vscode.OutputChannel | undefined;
+let logFilePath: string | undefined;
+
+function isDebugLogEnabled(): boolean {
+    return vscode.workspace.getConfiguration('gitChangesThrough').get<boolean>('debugLog', false);
+}
+
+function log(message: string): void {
+    if (!isDebugLogEnabled()) {
+        return;
+    }
+    const line = `[${new Date().toISOString()}] ${message}`;
+    outputChannel?.appendLine(line);
+    if (logFilePath) {
+        try {
+            fs.appendFileSync(logFilePath, line + '\n');
+        } catch {
+            // Best-effort — never let logging break navigation.
+        }
+    }
+}
+
+function describeTabInput(input: unknown): string {
+    if (input instanceof vscode.TabInputTextDiff) {
+        return `diff(original=${input.original.fsPath}, modified=${input.modified.fsPath})`;
+    }
+    if (input instanceof vscode.TabInputText) {
+        return `text(${input.uri.fsPath})`;
+    }
+    return 'other';
+}
+
+function logTabGroups(): void {
+    if (!isDebugLogEnabled()) {
+        return;
+    }
+    const activeGroup = vscode.window.tabGroups.activeTabGroup;
+    for (const group of vscode.window.tabGroups.all) {
+        const marker = group === activeGroup ? '*' : ' ';
+        const tabs = group.tabs
+            .map(t => `${t.isActive ? '(active-tab)' : ''}${describeTabInput(t.input)}`)
+            .join(', ') || '(empty)';
+        log(`  ${marker} group[viewColumn=${group.viewColumn}]: ${tabs}`);
+    }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -252,18 +304,29 @@ function findActiveFileIndex(files: Change[]): number {
 // opens a plain read-only preview of the original content instead of a two-pane
 // diff — match that case too, or navigation would think the diff was never
 // opened and keep re-opening the same file forever instead of advancing.
+// Checks the *active tab of every visible editor group*, not just the group that
+// currently has keyboard focus. If we only checked the focused group, a split
+// editor (or focus having moved anywhere else — the SCM tree, a terminal, ...)
+// would make us think the diff was never opened, and we'd re-open it and jump
+// back to its FIRST hunk over and over instead of advancing — the file would
+// appear stuck forever on the same spot.
 function isViewingChange(change: Change): boolean {
-    const tab = vscode.window.tabGroups.activeTabGroup?.activeTab;
-    if (!tab) {
-        return false;
-    }
-    if (tab.input instanceof vscode.TabInputTextDiff) {
-        return tab.input.modified.fsPath === change.uri.fsPath
-            || tab.input.original.fsPath === change.originalUri?.fsPath;
-    }
-    if (tab.input instanceof vscode.TabInputText) {
-        return tab.input.uri.fsPath === change.uri.fsPath
-            || tab.input.uri.fsPath === change.originalUri?.fsPath;
+    for (const group of vscode.window.tabGroups.all) {
+        const tab = group.activeTab;
+        if (!tab) {
+            continue;
+        }
+        if (tab.input instanceof vscode.TabInputTextDiff) {
+            if (tab.input.modified.fsPath === change.uri.fsPath
+                || tab.input.original.fsPath === change.originalUri?.fsPath) {
+                return true;
+            }
+        } else if (tab.input instanceof vscode.TabInputText) {
+            if (tab.input.uri.fsPath === change.uri.fsPath
+                || tab.input.uri.fsPath === change.originalUri?.fsPath) {
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -275,6 +338,7 @@ function delay(ms: number): Promise<void> {
 // ── Core navigation logic ──────────────────────────────────────────────────────
 
 async function navigate(direction: 'next' | 'prev'): Promise<void> {
+    log(`navigate(${direction}) called. currentFileIndex(before)=${currentFileIndex}`);
     const git = getGitAPI();
     if (!git) {
         vscode.window.showErrorMessage('Git Changes Through Files: Git extension is not available.');
@@ -308,6 +372,7 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
     if (editorIdx !== -1) {
         currentFileIndex = editorIdx;
     }
+    log(`editorIdx=${editorIdx}, currentFileIndex(synced)=${currentFileIndex}, cachedFiles=${cachedFiles.length}`);
 
     const cfg = vscode.workspace.getConfiguration('gitChangesThrough');
     const wrapAround = cfg.get<boolean>('wrapAround', false);
@@ -315,26 +380,35 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
 
     // ── Try to navigate within the current file first ──────────────────────────
     if (currentFileIndex !== -1) {
+        const currentFile = cachedFiles[currentFileIndex];
+        log(`considering current file: ${currentFile.uri.fsPath}`);
         // If we're in a regular editor (not a diff view), open the diff for this
         // file first — don't treat it as "already past the last hunk".
-        const hunks = await getHunksForChange(repo, cachedFiles[currentFileIndex]);
+        const hunks = await getHunksForChange(repo, currentFile);
+        log(`hunks for current file: [${hunks.map(h => h.firstChangedLine).join(', ')}]`);
 
         if (hunks.length === 0) {
-            // No parseable diff (untracked / binary) — fall through to next file.
-        } else if (!isViewingChange(cachedFiles[currentFileIndex])) {
-            await openDiffAndJumpToHunk(cachedFiles[currentFileIndex], repo, direction === 'prev');
+            log('no parseable diff (untracked/binary) — falling through to next file');
+        } else if (!isViewingChange(currentFile)) {
+            log('isViewingChange=false — re-opening diff and jumping to first/last hunk. Tab groups at this moment:');
+            logTabGroups();
+            await openDiffAndJumpToHunk(currentFile, repo, direction === 'prev');
             return;
         } else {
             const editor = vscode.window.activeTextEditor;
             if (editor) {
                 const cursorLine = editor.selection.active.line + 1;
+                log(`isViewingChange=true, cursorLine=${cursorLine}, activeEditor.uri=${editor.document.uri.fsPath}`);
                 if (direction === 'next') {
                     const next = hunks.find(h => h.firstChangedLine > cursorLine);
-                    if (next) { jumpToHunk(editor, next); return; }
+                    if (next) { log(`jumping to next hunk at line ${next.firstChangedLine}`); jumpToHunk(editor, next); return; }
                 } else {
                     const prev = [...hunks].reverse().find(h => h.firstChangedLine < cursorLine);
-                    if (prev) { jumpToHunk(editor, prev); return; }
+                    if (prev) { log(`jumping to previous hunk at line ${prev.firstChangedLine}`); jumpToHunk(editor, prev); return; }
                 }
+                log('no further hunk in this file in that direction — moving to next/previous file');
+            } else {
+                log('isViewingChange=true but vscode.window.activeTextEditor is undefined — moving to next/previous file');
             }
         }
     }
@@ -352,6 +426,7 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
         if (wrapAround) {
             nextIdx = 0;
         } else {
+            log('already at the last change — nothing to do');
             vscode.window.showInformationMessage('Git Changes Through Files: Already at the last change.');
             return;
         }
@@ -360,6 +435,7 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
         if (wrapAround) {
             nextIdx = cachedFiles.length - 1;
         } else {
+            log('already at the first change — nothing to do');
             vscode.window.showInformationMessage('Git Changes Through Files: Already at the first change.');
             return;
         }
@@ -371,15 +447,40 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
     }
 
     currentFileIndex = nextIdx;
+    log(`moving to file index ${currentFileIndex}: ${cachedFiles[currentFileIndex].uri.fsPath}`);
     await openDiffAndJumpToHunk(cachedFiles[currentFileIndex], repo, direction === 'prev');
 }
 
 // ── Extension lifecycle ────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
+    outputChannel = vscode.window.createOutputChannel('Git Changes Through Files');
+    context.subscriptions.push(outputChannel);
+
+    try {
+        fs.mkdirSync(context.logUri.fsPath, { recursive: true });
+        logFilePath = nodePath.join(context.logUri.fsPath, 'navigation-debug.log');
+    } catch {
+        logFilePath = undefined;
+    }
+
     context.subscriptions.push(
         vscode.commands.registerCommand('gitChangesThrough.nextChange', () => navigate('next')),
         vscode.commands.registerCommand('gitChangesThrough.previousChange', () => navigate('prev')),
+        vscode.commands.registerCommand('gitChangesThrough.openDebugLog', async () => {
+            if (!isDebugLogEnabled()) {
+                vscode.window.showWarningMessage(
+                    'Git Changes Through Files: Enable "gitChangesThrough.debugLog" in settings first, then reproduce the issue.'
+                );
+                return;
+            }
+            if (!logFilePath || !fs.existsSync(logFilePath)) {
+                vscode.window.showInformationMessage('Git Changes Through Files: No log recorded yet — trigger Next/Previous Change first.');
+                return;
+            }
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(logFilePath));
+            await vscode.window.showTextDocument(doc);
+        }),
     );
 }
 

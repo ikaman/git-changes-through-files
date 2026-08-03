@@ -2,7 +2,7 @@
   "name": "git-changes-through-files",
   "displayName": "Git Changes Through Files",
   "description": "Navigate git diff changes across all changed files — automatically crosses file boundaries in Source Control order.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "ikaman",
   "license": "MIT",
   "icon": "icon.png",
@@ -43,6 +43,11 @@
         "command": "gitChangesThrough.previousChange",
         "title": "Previous Change",
         "category": "Git Changes"
+      },
+      {
+        "command": "gitChangesThrough.openDebugLog",
+        "title": "Open Debug Log",
+        "category": "Git Changes"
       }
     ],
     "configuration": {
@@ -57,6 +62,11 @@
           "type": "boolean",
           "default": false,
           "description": "When at the last change of the last file, wrap around to the first file's first change (and vice versa going backwards)."
+        },
+        "gitChangesThrough.debugLog": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log detailed navigation decisions to a file for troubleshooting. Use 'Git Changes: Open Debug Log' to find/open it after reproducing an issue."
         }
       }
     }
@@ -65,7 +75,9 @@
     "vscode:prepublish": "yarn compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "pretest": "yarn compile",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "20.x",

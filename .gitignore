@@ -1,5 +1,6 @@
 node_modules/
 out/
+test/.log-out/
 *.vsix
 .vscode-test/
 *.js.map

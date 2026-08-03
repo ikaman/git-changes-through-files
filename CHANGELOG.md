@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.2] — 2026-08-03
+
+### Fixed
+- Navigation could get permanently stuck re-jumping to the first hunk of the same file instead of advancing, whenever the diff editor wasn't in the currently *focused* editor group (e.g. with a split editor / multiple groups open). `isViewingChange()` now checks the active tab of every visible editor group instead of only the focused one.
+
+### Added
+- Setting **`gitChangesThrough.debugLog`** (default `false`) — logs detailed navigation decisions to a file for troubleshooting.
+- Command **"Git Changes: Open Debug Log"** — opens the recorded debug log.
+- Automated test suite (`npm test`) covering the navigation state machine, including a regression test for the fix above.
+
 ## [0.5.0] — 2026-04-03
 
 ### Added
