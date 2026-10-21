@@ -2,7 +2,7 @@
   "name": "git-changes-through-files",
   "displayName": "Git Changes Through Files",
   "description": "Navigate git diff changes across all changed files — automatically crosses file boundaries in Source Control order.",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "publisher": "ikaman",
   "license": "MIT",
   "icon": "icon.png",
@@ -62,6 +62,11 @@
           "type": "boolean",
           "default": false,
           "description": "When at the last change of the last file, wrap around to the first file's first change (and vice versa going backwards)."
+        },
+        "gitChangesThrough.showPosition": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show in the status bar which Source Control entry the active editor is (e.g. \"Staged 7/10\"), once Next/Previous Change has been used. Useful for staged entries, which VS Code does not select in the Source Control panel."
         },
         "gitChangesThrough.debugLog": {
           "type": "boolean",

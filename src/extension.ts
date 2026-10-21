@@ -10,13 +10,19 @@ interface GitExtension {
 
 interface GitAPI {
     repositories: Repository[];
+    toGitUri(uri: vscode.Uri, ref: string): vscode.Uri;
 }
 
 interface Repository {
     rootUri: vscode.Uri;
     state: RepositoryState;
+    /** Despite the name: `git diff -- <path>`, i.e. index vs working tree. */
     diffWithHEAD(path: string): Promise<string>;
+    /** `git diff --cached -- <path>`, i.e. HEAD vs index. */
     diffIndexWithHEAD(path: string): Promise<string>;
+    /** treeish '' = the index. */
+    getObjectDetails(treeish: string, path: string): Promise<{ mode: string; object: string; size: number }>;
+    diffBlobs(object1: string, object2: string): Promise<string>;
 }
 
 interface RepositoryState {
@@ -30,6 +36,27 @@ interface Change {
     originalUri: vscode.Uri;
     renameUri: vscode.Uri | undefined;
     status: number;
+}
+
+// Values of the git extension's Status enum that are handled specially below.
+const STATUS_INDEX_ADDED = 1;
+const STATUS_INDEX_DELETED = 2;
+const STATUS_INDEX_RENAMED = 3;
+const STATUS_INDEX_COPIED = 4;
+
+// Which Source Control group an entry is listed under.
+type ChangeGroup = 'merge' | 'index' | 'workingTree';
+
+// One row of the Source Control panel. The same file can be listed twice — under
+// Staged Changes AND Changes (git status "MM", "AM", "RM") — so a row is
+// identified by (group, path), never by path alone.
+interface Entry {
+    change: Change;
+    group: ChangeGroup;
+}
+
+function entryKey(entry: Entry): string {
+    return `${entry.group}:${entry.change.uri.fsPath}`;
 }
 
 // ── Hunk parsing ───────────────────────────────────────────────────────────────
@@ -88,9 +115,13 @@ function parseHunks(diffText: string): Hunk[] {
 
 // ── Session state ──────────────────────────────────────────────────────────────
 
-let currentFileIndex = -1;
-let cachedFiles: Change[] = [];
+// The entry navigation last moved to, as entryKey(). Stored as a key rather than
+// an index so it survives the list changing between presses (staging, new files).
+let currentEntryKey: string | undefined;
+let cachedFiles: Entry[] = [];
 let cachedRepoRoot = '';
+// The position item stays hidden until Next/Previous is used for the first time.
+let hasNavigated = false;
 
 // ── Debug logging ─────────────────────────────────────────────────────────────
 // Off by default. When enabled via gitChangesThrough.debugLog, every navigate()
@@ -222,29 +253,83 @@ function isScmTreeView(): boolean {
     return vscode.workspace.getConfiguration('scm').get<string>('defaultViewMode') === 'tree';
 }
 
-function getAllChanges(repo: Repository): Change[] {
+function getAllChanges(repo: Repository): Entry[] {
     const treeView = isScmTreeView();
+    const inGroup = (group: ChangeGroup) => (change: Change): Entry => ({ change, group });
     return [
-        ...repo.state.mergeChanges,
-        ...sortChanges(repo.state.indexChanges, treeView),
-        ...sortChanges(repo.state.workingTreeChanges, treeView),
+        ...repo.state.mergeChanges.map(inGroup('merge')),
+        ...sortChanges(repo.state.indexChanges, treeView).map(inGroup('index')),
+        ...sortChanges(repo.state.workingTreeChanges, treeView).map(inGroup('workingTree')),
     ];
 }
 
-async function getHunksForChange(repo: Repository, change: Change): Promise<Hunk[]> {
+function relativePath(repo: Repository, uri: vscode.Uri): string {
+    return nodePath.relative(repo.rootUri.fsPath, uri.fsPath).replace(/\\/g, '/');
+}
+
+// The hunks must come from the same diff the editor shows for this entry: a staged
+// entry compares HEAD with the index, a working-tree entry the index with the file
+// on disk. The group decides which — not whether the path is staged at all, since a
+// file listed under both groups is staged for its Changes entry too.
+async function getDiffForEntry(repo: Repository, entry: Entry): Promise<string> {
+    const { change } = entry;
+    const relPath = relativePath(repo, change.uri);
+    if (entry.group !== 'index') {
+        return repo.diffWithHEAD(relPath);
+    }
+    if (change.status === STATUS_INDEX_RENAMED) {
+        // `git diff --cached -- <new path>` can't pair a rename (the pathspec filters
+        // out the old path), so it reports the whole file as added: a bogus stop at
+        // line 1 for a pure rename, and the real edits of a rename+edit lost. Diff the
+        // two blobs instead — the same HEAD(old path) vs index(new path) pair the diff
+        // editor shows. A pure rename then has no hunks at all.
+        try {
+            const [before, after] = await Promise.all([
+                repo.getObjectDetails('HEAD', relativePath(repo, change.originalUri)),
+                repo.getObjectDetails('', relPath),
+            ]);
+            return await repo.diffBlobs(before.object, after.object);
+        } catch (err) {
+            log(`blob diff for staged rename failed (${err}) — falling back to diffIndexWithHEAD`);
+        }
+    }
+    return repo.diffIndexWithHEAD(relPath);
+}
+
+async function getHunksForChange(repo: Repository, entry: Entry): Promise<Hunk[]> {
     try {
-        const relPath = nodePath
-            .relative(repo.rootUri.fsPath, change.uri.fsPath)
-            .replace(/\\/g, '/');
-        const isStaged = repo.state.indexChanges.some(
-            c => c.uri.fsPath === change.uri.fsPath
-        );
-        const diff = isStaged
-            ? await repo.diffIndexWithHEAD(relPath)
-            : await repo.diffWithHEAD(relPath);
-        return parseHunks(diff);
+        return parseHunks(await getDiffForEntry(repo, entry));
     } catch {
         return [];
+    }
+}
+
+// `git.openChange <uri>` looks the path up under Changes FIRST and only then under
+// Staged Changes, so for a file listed in both it always opens the working-tree diff.
+// For the staged entry of such a file, open its diff ourselves with the same URIs and
+// title the git extension uses for a staged entry.
+async function openEntry(entry: Entry, repo: Repository, git: GitAPI): Promise<void> {
+    const { change } = entry;
+    const alsoInWorkingTree = repo.state.workingTreeChanges.some(
+        c => c.uri.fsPath === change.uri.fsPath
+    );
+    if (entry.group !== 'index' || !alsoInWorkingTree) {
+        await vscode.commands.executeCommand('git.openChange', change.uri);
+        return;
+    }
+    const name = nodePath.basename(change.uri.fsPath);
+    if (change.status === STATUS_INDEX_DELETED) {
+        await vscode.commands.executeCommand('vscode.open', git.toGitUri(change.uri, 'HEAD'), {}, `${name} (Deleted)`);
+    } else if (change.status === STATUS_INDEX_ADDED || change.status === STATUS_INDEX_COPIED) {
+        // Nothing in HEAD to compare against — the git extension shows the index version alone.
+        await vscode.commands.executeCommand('vscode.open', git.toGitUri(change.uri, ''), {}, `${name} (Index)`);
+    } else {
+        await vscode.commands.executeCommand(
+            'vscode.diff',
+            git.toGitUri(change.originalUri, 'HEAD'),
+            git.toGitUri(change.uri, ''),
+            `${name} (Index)`,
+        );
     }
 }
 
@@ -255,19 +340,20 @@ function jumpToHunk(editor: vscode.TextEditor, hunk: Hunk): void {
 }
 
 async function openDiffAndJumpToHunk(
-    change: Change,
+    entry: Entry,
     repo: Repository,
+    git: GitAPI,
     goToLast: boolean,
 ): Promise<void> {
     // Fetch hunks BEFORE opening so we can position immediately on editor activation.
-    const hunks = await getHunksForChange(repo, change);
+    const hunks = await getHunksForChange(repo, entry);
     const targetHunk = hunks.length > 0
         ? (goToLast ? hunks[hunks.length - 1] : hunks[0])
         : null;
 
     let positioned = false;
 
-    // Register listener before git.openChange so we catch the very first render.
+    // Register listener before opening so we catch the very first render.
     const disposable = vscode.window.onDidChangeActiveTextEditor(editor => {
         if (editor && !positioned) {
             positioned = true;
@@ -278,7 +364,7 @@ async function openDiffAndJumpToHunk(
         }
     });
 
-    await vscode.commands.executeCommand('git.openChange', change.uri);
+    await openEntry(entry, repo, git);
 
     // If the diff was already open in the active tab, no change event fires — position now.
     if (!positioned) {
@@ -290,14 +376,81 @@ async function openDiffAndJumpToHunk(
     }
 }
 
-function findActiveFileIndex(files: Change[]): number {
+function gitRef(uri: vscode.Uri): string | undefined {
+    if (uri.scheme !== 'git') {
+        return undefined;
+    }
+    try {
+        return JSON.parse(uri.query).ref;
+    } catch {
+        return undefined;
+    }
+}
+
+// Which group's diff a tab shows, when the tab can tell: the modified side of a
+// staged diff is the index version (a git: URI with ref ''), that of a working-tree
+// diff is the file on disk. undefined when it can't tell (a plain editor, a deleted
+// file's read-only preview, ...).
+function groupShownByTab(input: unknown): ChangeGroup | undefined {
+    if (input instanceof vscode.TabInputTextDiff) {
+        if (input.modified.scheme === 'file') {
+            return 'workingTree';
+        }
+        return gitRef(input.modified) === '' ? 'index' : undefined;
+    }
+    if (input instanceof vscode.TabInputText) {
+        // A staged new/copied file is shown alone, as its index version.
+        return gitRef(input.uri) === '' ? 'index' : undefined;
+    }
+    return undefined;
+}
+
+function tabShowsPath(input: unknown, fsPath: string): boolean {
+    if (input instanceof vscode.TabInputTextDiff) {
+        return input.modified.fsPath === fsPath || input.original.fsPath === fsPath;
+    }
+    if (input instanceof vscode.TabInputText) {
+        return input.uri.fsPath === fsPath;
+    }
+    return false;
+}
+
+// Group shown by the tab displaying `fsPath`: the focused editor group's active tab
+// first, then those of the other visible groups (split editor).
+function groupShownFor(fsPath: string): ChangeGroup | undefined {
+    const { activeTabGroup, all } = vscode.window.tabGroups;
+    for (const group of [activeTabGroup, ...all.filter(g => g !== activeTabGroup)]) {
+        const input = group.activeTab?.input;
+        if (input && tabShowsPath(input, fsPath)) {
+            const shown = groupShownByTab(input);
+            if (shown) {
+                return shown;
+            }
+        }
+    }
+    return undefined;
+}
+
+function findActiveFileIndex(files: Entry[]): number {
     const activePath = vscode.window.activeTextEditor?.document.uri.fsPath;
     if (!activePath) {
         return -1;
     }
-    return files.findIndex(
-        c => c.uri.fsPath === activePath || c.originalUri?.fsPath === activePath
+    const matches = files.filter(
+        e => e.change.uri.fsPath === activePath || e.change.originalUri?.fsPath === activePath
     );
+    if (matches.length <= 1) {
+        return matches.length === 1 ? files.indexOf(matches[0]) : -1;
+    }
+    // The file is listed under both Staged Changes and Changes. The diff on screen
+    // says which entry we're on (it wins, so a copy the user clicked in the panel is
+    // honoured); if it can't tell, stay on the entry we last moved to.
+    const shown = groupShownFor(activePath);
+    const match = matches.find(e => e.group === shown)
+        ?? matches.find(e => entryKey(e) === currentEntryKey)
+        ?? matches[0];
+    log(`active path is listed ${matches.length}x; tab shows group=${shown ?? '?'} -> ${entryKey(match)}`);
+    return files.indexOf(match);
 }
 
 // Deleted files have no "modified" side to diff against, so `git.openChange`
@@ -310,10 +463,17 @@ function findActiveFileIndex(files: Change[]): number {
 // would make us think the diff was never opened, and we'd re-open it and jump
 // back to its FIRST hunk over and over instead of advancing — the file would
 // appear stuck forever on the same spot.
-function isViewingChange(change: Change): boolean {
+// A diff of the same file from the OTHER group (Staged Changes vs Changes) doesn't
+// count — its hunks are different ones.
+function isViewingChange(entry: Entry): boolean {
+    const { change } = entry;
     for (const group of vscode.window.tabGroups.all) {
         const tab = group.activeTab;
         if (!tab) {
+            continue;
+        }
+        const shown = groupShownByTab(tab.input);
+        if (shown && entry.group !== 'merge' && shown !== entry.group) {
             continue;
         }
         if (tab.input instanceof vscode.TabInputTextDiff) {
@@ -338,7 +498,7 @@ function delay(ms: number): Promise<void> {
 // ── Core navigation logic ──────────────────────────────────────────────────────
 
 async function navigate(direction: 'next' | 'prev'): Promise<void> {
-    log(`navigate(${direction}) called. currentFileIndex(before)=${currentFileIndex}`);
+    log(`navigate(${direction}) called. currentEntry(before)=${currentEntryKey ?? 'none'}`);
     const git = getGitAPI();
     if (!git) {
         vscode.window.showErrorMessage('Git Changes Through Files: Git extension is not available.');
@@ -351,13 +511,15 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
         return;
     }
 
+    hasNavigated = true;
+
     // Always reveal the SCM panel so the user can see which file is active.
     await vscode.commands.executeCommand('workbench.view.scm');
 
     // Reset state when the active repo changes.
     if (repo.rootUri.fsPath !== cachedRepoRoot) {
         cachedRepoRoot = repo.rootUri.fsPath;
-        currentFileIndex = -1;
+        currentEntryKey = undefined;
     }
 
     cachedFiles = getAllChanges(repo);
@@ -367,11 +529,12 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
         return;
     }
 
-    // Sync currentFileIndex to whatever is actually open in the editor.
+    // Sync to whatever is actually open in the editor; if that isn't a listed
+    // change, stay on the entry we last moved to (if it's still listed).
     const editorIdx = findActiveFileIndex(cachedFiles);
-    if (editorIdx !== -1) {
-        currentFileIndex = editorIdx;
-    }
+    const currentFileIndex = editorIdx !== -1
+        ? editorIdx
+        : cachedFiles.findIndex(e => entryKey(e) === currentEntryKey);
     log(`editorIdx=${editorIdx}, currentFileIndex(synced)=${currentFileIndex}, cachedFiles=${cachedFiles.length}`);
 
     const cfg = vscode.workspace.getConfiguration('gitChangesThrough');
@@ -381,18 +544,19 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
     // ── Try to navigate within the current file first ──────────────────────────
     if (currentFileIndex !== -1) {
         const currentFile = cachedFiles[currentFileIndex];
-        log(`considering current file: ${currentFile.uri.fsPath}`);
+        log(`considering current file: ${entryKey(currentFile)}`);
         // If we're in a regular editor (not a diff view), open the diff for this
         // file first — don't treat it as "already past the last hunk".
         const hunks = await getHunksForChange(repo, currentFile);
         log(`hunks for current file: [${hunks.map(h => h.firstChangedLine).join(', ')}]`);
 
         if (hunks.length === 0) {
-            log('no parseable diff (untracked/binary) — falling through to next file');
+            // Its diff was shown by the press that moved here, so this press moves on.
+            log('no hunks (untracked/binary/pure rename) — falling through to next file');
         } else if (!isViewingChange(currentFile)) {
             log('isViewingChange=false — re-opening diff and jumping to first/last hunk. Tab groups at this moment:');
             logTabGroups();
-            await openDiffAndJumpToHunk(currentFile, repo, direction === 'prev');
+            await openDiffAndJumpToHunk(currentFile, repo, git, direction === 'prev');
             return;
         } else {
             const editor = vscode.window.activeTextEditor;
@@ -446,9 +610,46 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
         await delay(50);
     }
 
-    currentFileIndex = nextIdx;
-    log(`moving to file index ${currentFileIndex}: ${cachedFiles[currentFileIndex].uri.fsPath}`);
-    await openDiffAndJumpToHunk(cachedFiles[currentFileIndex], repo, direction === 'prev');
+    const target = cachedFiles[nextIdx];
+    currentEntryKey = entryKey(target);
+    log(`moving to file index ${nextIdx}: ${entryKey(target)}`);
+    await openDiffAndJumpToHunk(target, repo, git, direction === 'prev');
+}
+
+// ── Status bar ─────────────────────────────────────────────────────────────────
+// Shows which Source Control entry the active editor is, e.g. "Staged 7/10". The
+// panel can't show it for staged entries: VS Code's scm.autoReveal only matches an
+// editor showing the file on disk, never a staged (index) diff, and there is no API
+// to select a row in the Source Control view from an extension.
+
+let statusBarItem: vscode.StatusBarItem | undefined;
+
+const GROUP_LABELS: Record<ChangeGroup, { short: string; long: string }> = {
+    merge: { short: 'Merge', long: 'Merge Changes' },
+    index: { short: 'Staged', long: 'Staged Changes' },
+    workingTree: { short: 'Changes', long: 'Changes' },
+};
+
+function updateStatusBar(): void {
+    if (!statusBarItem) {
+        return;
+    }
+    const enabled = vscode.workspace.getConfiguration('gitChangesThrough').get<boolean>('showPosition', true);
+    const git = enabled && hasNavigated ? getGitAPI() : undefined;
+    const repo = git ? getRepo(git) : undefined;
+    const files = repo ? getAllChanges(repo) : [];
+    const idx = findActiveFileIndex(files);
+    if (!repo || idx === -1) {
+        statusBarItem.hide();
+        return;
+    }
+    const entry = files[idx];
+    const sameGroup = files.filter(e => e.group === entry.group);
+    const label = GROUP_LABELS[entry.group];
+    statusBarItem.text = `$(git-compare) ${label.short} ${sameGroup.indexOf(entry) + 1}/${sameGroup.length}`;
+    statusBarItem.tooltip = `${label.long}: ${relativePath(repo, entry.change.uri)}\n`
+        + `Entry ${idx + 1} of ${files.length} in Source Control. Click to show the panel.`;
+    statusBarItem.show();
 }
 
 // ── Extension lifecycle ────────────────────────────────────────────────────────
@@ -456,6 +657,18 @@ async function navigate(direction: 'next' | 'prev'): Promise<void> {
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = vscode.window.createOutputChannel('Git Changes Through Files');
     context.subscriptions.push(outputChannel);
+
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+    statusBarItem.command = 'workbench.view.scm';
+    context.subscriptions.push(
+        statusBarItem,
+        vscode.window.onDidChangeActiveTextEditor(() => updateStatusBar()),
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('gitChangesThrough.showPosition')) {
+                updateStatusBar();
+            }
+        }),
+    );
 
     try {
         fs.mkdirSync(context.logUri.fsPath, { recursive: true });
@@ -465,8 +678,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('gitChangesThrough.nextChange', () => navigate('next')),
-        vscode.commands.registerCommand('gitChangesThrough.previousChange', () => navigate('prev')),
+        // Also refresh the status bar after a press that only moved between hunks
+        // (no editor change event) or that opened an already active diff.
+        vscode.commands.registerCommand('gitChangesThrough.nextChange', () => navigate('next').finally(updateStatusBar)),
+        vscode.commands.registerCommand('gitChangesThrough.previousChange', () => navigate('prev').finally(updateStatusBar)),
         vscode.commands.registerCommand('gitChangesThrough.openDebugLog', async () => {
             if (!isDebugLogEnabled()) {
                 vscode.window.showWarningMessage(

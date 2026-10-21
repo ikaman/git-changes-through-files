@@ -9,6 +9,7 @@ VS Code's built-in *Next Change* / *Previous Change* stays inside the current fi
 ## Features
 
 - **Cross-file navigation** — moves through every changed file in the order shown in the Source Control panel (Merge Changes → Staged Changes → Changes).
+- **Files in both Staged Changes and Changes** — a file that was staged and then edited again is visited twice, once per entry, each with its own diff (HEAD ↔ index, then index ↔ working tree).
 - **Deleted files included** — opens the diff view for deleted files so nothing is skipped.
 - **Close on move** — optionally closes the current file when jumping to the next one, keeping your editor tabs clean.
 - **Wrap-around** — optionally loops from the last change back to the first (disabled by default).
@@ -33,6 +34,7 @@ Search for either command in the Command Palette (`Ctrl+Shift+P`) to run them or
 |---|---|---|---|
 | `gitChangesThrough.closeFileOnMove` | boolean | `false` | Close the current editor when navigating to a different changed file. |
 | `gitChangesThrough.wrapAround` | boolean | `false` | After the last change of the last file, wrap around to the first file's first change (and vice versa). |
+| `gitChangesThrough.showPosition` | boolean | `true` | Show the current Source Control entry in the status bar (e.g. `Staged 7/10`), once Next/Previous has been used. VS Code doesn't select staged entries in the panel, so this shows where you are there. |
 
 ---
 

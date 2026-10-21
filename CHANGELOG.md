@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.3] — 2026-10-21
+
+### Fixed
+- A file listed under **both** Staged Changes and Changes (staged, then edited again: `MM`, `AM`, `RM` in `git status`) broke navigation. Next jumped back into the Staged group every time it reached such a file, so the end of the list was never reached. Each Source Control entry is now identified by its group and path, not by path alone. Next/Previous visit every entry once, in panel order.
+- The staged entry of such a file now opens its staged diff (HEAD ↔ index). Before, `git.openChange` always opened the working-tree diff for it.
+- Hunks of the Changes entry of such a file are now read from its working-tree diff, not from the staged diff.
+- Staged renames: hunks are now computed between the old and the new path. Before, git reported a staged rename as a whole new file. A pure rename got a bogus stop at line 1, and the real edits of a renamed-and-edited file were never visited. A pure rename now takes exactly one press, which shows its diff, and the next press moves on.
+
+### Added
+- Status bar item showing which Source Control entry the active editor is, e.g. **`Staged 7/10`** or **`Changes 3/19`**. It appears once Next/Previous Change has been used and hides when the active editor isn't a listed change. Clicking it shows the Source Control panel. VS Code does not select staged entries in the panel (its `scm.autoReveal` only matches editors showing the file on disk, and extensions can't select a row there), so this is the way to see where you are in the Staged group.
+- Setting **`gitChangesThrough.showPosition`** (default `true`) to turn the status bar item off.
+
 ## [0.5.2] — 2026-08-03
 
 ### Fixed
